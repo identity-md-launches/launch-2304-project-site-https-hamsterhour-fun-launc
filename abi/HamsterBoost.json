@@ -40,6 +40,40 @@
   },
   {
     "type": "function",
+    "name": "capDayCurves",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "swept",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "sweptLoss",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "capDays",
     "inputs": [
       {

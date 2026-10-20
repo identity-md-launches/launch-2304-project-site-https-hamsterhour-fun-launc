@@ -117,8 +117,17 @@ contract HamsterBoost {
         uint256 allowance; // Amount actually emitted: min(raw, 2M) on the curve.
     }
 
+    /// @dev The curve in force when a capped day was cached. A day's `raw` and `allowance` were
+    /// summed on this curve, so its windows are priced on the same curve forever, even if the
+    /// dormant-boost sweep later extends the live curve past the day's raw positions.
+    struct CapCurve {
+        bool swept;
+        uint256 sweptLoss;
+    }
+
     mapping(address => mapping(address => CapState)) public capStates;
     mapping(address => mapping(address => mapping(uint256 => CapDay))) public capDays;
+    mapping(address => mapping(address => mapping(uint256 => CapCurve))) public capDayCurves;
 
     error AlreadyDone();
     error NotReady();
@@ -541,6 +550,7 @@ contract HamsterBoost {
             uint256 day = c.nextDay;
             CapDay memory d = _nextCapDay(game, g, s, c);
             capDays[vault][game][day] = d;
+            capDayCurves[vault][game][day] = CapCurve(s.swept, s.sweptLoss);
             emit CapDayPrepared(vault, game, day, d.raw, d.allowance);
         }
         capStates[vault][game] = c;
@@ -558,18 +568,26 @@ contract HamsterBoost {
         return (c.complete, c.dropped);
     }
 
+    /// @dev A capped day and the curve state its windows must be priced on: the cached snapshot
+    /// for a cached day, the live state for one evaluated on the fly.
     function _capDayView(address vault, address game, IMiningView.GameData memory g, State memory s, uint256 day)
         internal
         view
-        returns (CapDay memory d)
+        returns (CapDay memory d, State memory priced)
     {
+        priced = s;
         d = capDays[vault][game][day];
-        if (d.ready) return d;
+        if (d.ready) {
+            // A fresh struct: `s` is the live state and must not be rewritten through an alias.
+            CapCurve memory curve = capDayCurves[vault][game][day];
+            priced = State(address(0), 0, address(0), curve.swept, curve.sweptLoss, 0, 0, 0);
+            return (d, priced);
+        }
         CapState memory c = _capState(vault, game, g);
         if (day < c.nextDay) revert ExcludedWindow();
         while (true) {
             d = _nextCapDay(game, g, s, c);
-            if (c.nextDay - 1 == day) return d;
+            if (c.nextDay - 1 == day) return (d, priced);
         }
     }
 
@@ -646,9 +664,12 @@ contract HamsterBoost {
         if (g.previous == address(0)) {
             pos = g.globalOrigin + (before_ - g.localOrigin);
         } else if (k < _capEnd(g)) {
-            CapDay memory d = _capDayView(vault, game, g, s, (uint256(g.genesis) + k * 1 hours) / 1 days);
+            (CapDay memory d, State memory priced) =
+                _capDayView(vault, game, g, s, (uint256(g.genesis) + k * 1 hours) / 1 days);
             pos = d.pos + (before_ - d.lossStart);
-            uint256 raw = _curve(s, pos + total) - _curve(s, pos);
+            // Same curve as the one that produced d.raw, so the day's shares always sum to at
+            // most d.allowance and a window pays the same whenever it is claimed.
+            uint256 raw = _curve(priced, pos + total) - _curve(priced, pos);
             return (d.raw == 0 ? 0 : M.mulDiv(d.allowance, raw, d.raw), total);
         } else {
             pos = g.globalOrigin + (before_ - g.localOrigin) - _droppedView(vault, game, g, s);

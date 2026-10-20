@@ -283,6 +283,74 @@ contract MiningTest is VaultTestBase {
         _conservation();
     }
 
+    /// A 365-day sweep that lands inside a successor's cap period, after a capped day was cached
+    /// and partly claimed, prices that day's remaining windows on the curve that produced its
+    /// cached raw sum. The day never pays more than its allowance, identical windows pay the same
+    /// before and after the sweep, and a day cached after the sweep records the extended curve.
+    function test_sweepInsideCapPeriodKeepsCachedDaysOnTheirCurve() public {
+        // Deploy 360 days before v2 genesis so the sweep opens 5 days and 1 hour after genesis,
+        // once the second capped UTC day (ending 00:20 in the v2 timetable) is fully finalized.
+        vm.warp(uint256(GENESIS) - 360 days + 1 hours);
+        HamsterBoost engine = new HamsterBoost();
+        HamsterVault early = new HamsterVault(TEAM, address(engine));
+        vm.warp(uint256(GENESIS) + 2 hours);
+        MockToken token = new MockToken();
+        token.mint(address(early), 800_000_000 ether);
+        token.mint(alice, 200_000_000 ether);
+        vm.prank(TEAM);
+        early.bindToken(address(token));
+        MockGame next = new MockGame(GENESIS);
+        vm.prank(TEAM);
+        early.scheduleGame(address(next));
+        vm.warp(uint256(GENESIS) + 50 hours);
+        early.executeGame();
+        uint256 day = vm.getBlockTimestamp() / 1 days + 1;
+        uint256 first = (day * 1 days - GENESIS + 1 hours - 1) / 1 hours;
+        uint256 second = ((day + 1) * 1 days - GENESIS + 1 hours - 1) / 1 hours;
+        next.setLoss(first, alice, 150 ether);
+        next.setLoss(first + 1, bob, 150 ether);
+        next.setLoss(second, carol, 300 ether);
+        vm.warp((day + 1) * 1 days + 2 hours);
+        game.finalize(1000);
+        next.finalize(1000);
+        early.resolveGame(address(next));
+        engine.prepareCap(address(early), address(next), 16);
+        (,,, uint256 raw, uint256 allowance) = engine.capDays(address(early), address(next), day);
+        assertEq(raw, 6_000_000 ether);
+        assertEq(allowance, 2_000_000 ether);
+        assertEq(early.claimMined(address(next), one(first), alice), 1_000_000 ether);
+        (uint256 pending,) = early.windowBudget(address(next), first + 1);
+        assertEq(pending, 1_000_000 ether);
+        // The second capped day is finalized but not cached when the sweep happens.
+        vm.warp(early.deployedAt() + 365 days);
+        assertEq(vm.getBlockTimestamp(), uint256(GENESIS) + 5 days + 1 hours);
+        next.finalize(1000);
+        assertEq(next.nextFinalizeWindow(), second + 24);
+        early.sweepDormantBoost();
+        assertEq(early.miningAllocation(), 800_000_000 ether);
+        assertEq(engine.status(address(early)).sweptLoss, 200 ether);
+        // The cached day keeps the base curve it was summed on.
+        (bool swept, uint256 sweptLoss) = engine.capDayCurves(address(early), address(next), day);
+        assertFalse(swept);
+        assertEq(sweptLoss, 0);
+        (uint256 budget,) = early.windowBudget(address(next), first + 1);
+        assertEq(budget, 1_000_000 ether);
+        assertEq(early.claimMined(address(next), one(first + 1), bob), 1_000_000 ether);
+        (, uint256 paid,,,,) = early.windowAccounting(address(next), first + 1);
+        assertEq(paid, 1_000_000 ether);
+        // A day cached after the sweep is summed and priced on the extended curve.
+        assertEq(early.claimMined(address(next), one(second), carol), 2_000_000 ether);
+        (swept, sweptLoss) = engine.capDayCurves(address(early), address(next), day + 1);
+        assertTrue(swept);
+        assertEq(sweptLoss, 200 ether);
+        (uint256 globalLoss,,) = early.currentMiningState();
+        assertEq(globalLoss, 200 ether);
+        assertEq(early.emissionCurve(globalLoss), early.miningCommitted());
+        assertEq(early.miningCommitted(), 4_000_000 ether);
+        assertEq(token.balanceOf(address(early)), early.hamsterLiability());
+        assertLe(early.miningCommitted(), early.miningAllocation());
+    }
+
     function test_miningStateFallsBackToOutgoingGameWhileSuccessorUnresolved() public {
         game.setLoss(0, alice, 5 ether);
         game.finalize(1);

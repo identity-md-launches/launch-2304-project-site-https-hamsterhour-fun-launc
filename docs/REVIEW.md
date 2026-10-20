@@ -26,7 +26,7 @@ Linear streams preserve each deposit's end and fixed amount. Drip uses an anchor
 
 - Direct compatible games must provide honest immutable sequential loss history. Interface validation cannot establish that semantic property; the TEAM game-selection power is a substantive trust assumption.
 - Canonical NFT identity is attested by TEAM's timelocked selection. `ownerOf` checks cannot discover a transfer away and back between observations. This is explicitly documented, and observed invalidation is permanent.
-- The dormant boost sweep scales the curve beyond the finalized global loss at the sweep so it converges to 800M; the base curve, halving points and all previously finalized windows are unchanged.
+- The dormant boost sweep scales the curve beyond the finalized global loss at the sweep so it converges to 800M; the base curve, halving points and all previously finalized windows are unchanged. A capped day cached before the sweep stores the curve it was summed on and prices every one of its windows on it, so a sweep inside a successor's 14-day cap period cannot push a cached day past its allowance or make a window's payout depend on when it is claimed.
 - With many queued events, users need several permissionless checkpoint transactions. Boost preparation may need several calls per day and older unresolved game history can delay it. Base mining does not depend on boost preparation.
 - Unsolicited asset donations and rounding/voided entitlements have no administrative recovery path.
 - Tests use actual v2 source with locally signed fixture attestations; they do not claim to verify a live mainnet attestation or canonical NFT deployment.
