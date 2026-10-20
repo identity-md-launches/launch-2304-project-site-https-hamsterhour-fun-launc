@@ -1,0 +1,17 @@
+{
+  "kind": "evm_contracts",
+  "contracts": [
+    {
+      "contract": "HamsterBoost",
+      "constructorArgs": []
+    },
+    {
+      "contract": "HamsterVault",
+      "constructorArgs": [
+        "$owner",
+        "$contract:HamsterBoost"
+      ]
+    }
+  ],
+  "notes": "HAMSTER launch 1 of 2 on Ethereum mainnet: application contracts only, no token, pool, hook or distributor. HamsterBoost is a stateless-by-vault accounting companion (emission curve, new-game daily cap, Squeek boost registry keyed by the calling vault). It has no constructor arguments, no owner and holds no tokens. HamsterVault(team_, boostEngine_) is the immutable vault: team_ = $owner (TEAM, the launch wallet 0x6cba4751742f6989fa224b2dc5d5d52fcef98a34) and boostEngine_ = the HamsterBoost deployed just before it. Constants compiled into the source: IMD 0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7, initial game Hamster Hour v2 0xe33ab493249a2df0d8c4a71ac54f46d1f7778367 (registry starts there, retroactive from v2 window 0), supply check 1e27 and vault balance check 8e26 at bindToken, buckets mining 750M and boost 50M, 20,000 HAMSTER per IMD halving every 18,750 IMD, 48h game timelock, 14-day 2M/day new-game cap, 7-day vesting grants, 24h warm-up and unstake delay, 12h boost timelock, 365-day boost sweep. Constructors make no external calls and require no dependency code, so they rehearse on an empty chain. TEAM's only powers are bindToken once, scheduleGame (48h public timelock) and activateBoost once (12h timelock); there is no owner, pause, upgrade, arbitrary call or withdrawal path, and neither contract grants anything to msg.sender (the factory) or tx.origin. After deploy: TEAM calls scheduleStakingRecipient(vault) then executeStakingRecipient(vault) on the v2 game; launch 2 deploys HAMSTER with remainderTo = vault (exactly 800M) and its hook calls depositRewards, depositDrip, forwardJackpot and forwardOracle on the vault; then TEAM calls bindToken(token)."
+}
