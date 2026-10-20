@@ -40,7 +40,7 @@ Deployment, the manifest, source verification and confirmed addresses belong to 
 
 1. TEAM calls the **v2 game** `scheduleStakingRecipient(vault)`, then, after its **12-hour** timelock, `executeStakingRecipient(vault)`. The recipient is one-shot in v2. Its existing backlog is credited to the vault.
 2. Anyone can call `vault.pullGameRewards(game)`. This can happen before HAMSTER exists: with zero stake weight, IMD waits.
-3. Launch 2 deploys HAMSTER and its hook separately, with `remainderTo = vault` and exactly 800M HAMSTER delivered here. TEAM calls `bindToken(token)`. It checks the exact supply, exact vault balance and 18 decimals and can succeed once.
+3. Launch 2 deploys HAMSTER and its hook separately, with `remainderTo = vault` and exactly 800M HAMSTER delivered here. TEAM calls `bindToken(token)`. It checks the exact 1B supply, **at least** 800M in the vault and 18 decimals, and can succeed once. Any HAMSTER above 800M that reaches the vault (a stray transfer before bind, for example) is an unrescuable donation, as everywhere else in the vault; it cannot veto binding.
 4. The hook approves the vault to pull IMD and calls `depositRewards(amount)` for its 0.5% source, `depositDrip(amount)` for the 80% anti-snipe allocation, and `forwardJackpot(amount)` / `forwardOracle(amount)` for their respective allocations. The hook computes its tax shares; the vault accounts for the supplied amounts. These entry points accept donations from any caller.
 5. Keepers/site operators finalize game windows, resolve new game ranges, advance reward checkpoints when needed, prepare boost days and flush forwarded funds. Every vault maintenance operation is public.
 6. If canonical Squeek is launched on mainnet within the first year, TEAM verifies its canonical address and calls `activateBoost(collection)`. This schedules a one-shot commitment. Anyone can `executeBoost()` after 12 hours and **strictly before** the 365-day deadline. There is no guessed NFT address in the deployment.
@@ -58,7 +58,8 @@ At execution time `T`:
 - The old game's admitted windows are permanently restricted to `windowStart(k) < T`.
 - The successor admits only windows with `windowStart(k) >= T`. Its earlier backlog, including imported history, is excluded.
 - `resolveGame(successor)` waits until the previous game's **last counted window is finalized**, and until the successor's excluded prefix is finalized. It then fixes the successor's local origin and the previous range's global endpoint.
-- Successor claims wait for that resolution. The old game and its claims/reward pulls remain registered forever. A further switch cannot execute until the current game's origin is resolved.
+- Successor claims wait for that resolution. The old game and its claims/reward pulls remain registered forever. A further switch cannot execute until the current game's origin is resolved, so a scheduled game must finalize its windows permissionlessly (as v2 does with its 48-hour timeout): a successor whose finalization stalls forever would stall the registry, and there is deliberately no override. TEAM must review this before scheduling.
+- While the successor is unresolved, `currentMiningState()` reports the outgoing game's finalized history.
 
 This separates global cumulative loss even when both games have overlapping unresolved backlogs. It never resets a halving. Forwarded IMD uses the current game immediately after execution, including while loss-range resolution is pending.
 
@@ -73,7 +74,7 @@ F(x) = 750,000,000e18 - R_h
 
 This starts at 20,000 HAMSTER per IMD, halves every H, and saturates at 750M at sub-wei precision. A window's raw budget is `F(globalAfter) - F(globalBefore)`. An account receives `floor(windowBudget * lossOf(k, account) / totalEligibleLoss(k))`.
 
-For windows starting in the first **14 days after a switch**, the sum of raw budgets for that game's eligible windows on each UTC day is calculated. If it exceeds **2M HAMSTER**, every such window is scaled by `2M / sum`, rounded down. Claims wait until that UTC day has ended and all its relevant windows have finalized. A 23:20 window may finish after midnight. Scaling uses finalized history, never claim order. Withheld amounts do not restart or shift the curve.
+For windows starting in the first **14 days after a switch**, the successor's capped UTC days are evaluated in order from finalized history only. Each day's raw emission is the curve segment for that day's loss, starting from the effective position left by the previous day. If it exceeds **2M HAMSTER**, the day pays exactly the curve segment worth 2M (`allowance`), every window of the day is scaled by `allowance / raw`, rounded down, and the curve advances only by the loss that 2M actually consumed; the rest of the day's loss is left unconsumed (`dropped`). Nothing is forfeited: the next day, the uncapped windows after the period and every later game resume from the effective position, at the rate the curve had reached, so the total still converges to the allocation and halvings never reset. Claims wait until all windows of that UTC day have finalized (a 23:20 window finishes after midnight). Scaling uses finalized history, never claim order. The day results are cached by `boostEngine.prepareCap(vault, game, maxDays)` (permissionless, at most 16 days per call, stopping at the first unfinalized day); claims and boost-day preparation cache them automatically, so no claim re-reads sibling windows. `currentMiningState()` reports the effective global loss.
 
 `claimMined(game, windows, beneficiary)` is permissionless, accepts **1–32** indices and cannot redirect the beneficiary. Duplicate claims or duplicate indices revert atomically. It creates one 7-day grant for the batch's total positive entitlement. A zero-entitlement claim records the claim without creating a zero grant.
 
@@ -83,7 +84,7 @@ Each first window claim reserves its whole scaled budget. `windowAccounting` rep
 
 Every mined or boosted grant is nontransferable and vests linearly over **7 days from its claim**, by the second. All unwithdrawn grant principal, both unvested and vested, participates in staking after the same **24-hour warm-up** as deposited HAMSTER.
 
-`stake(amount)` creates a deposit lot. `requestUnstake(lotId, amount)` immediately stops that amount's weight and creates a **24-hour** release request. It can also cancel warming deposit principal. It cannot unstake a vesting grant. `withdrawUnstaked(account, requests)` and `withdrawVested(account, grantIds)` accept up to 32 IDs, pay only the named account and can be relayed by anyone. Withdrawing vested principal removes exactly its remaining stake weight, including during warm-up.
+`stake(amount)` creates a deposit lot. `requestUnstake(lotId, amount)` immediately stops that amount's weight and creates a **24-hour** release request. It can also cancel warming deposit principal. It cannot unstake a vesting grant. `withdrawUnstaked(account, requests)` and `withdrawVested(account, grantIds)` accept up to 32 IDs and pay only the named account. Unstake withdrawals can be relayed by anyone; **`withdrawVested` must be called by the grantee**, because withdrawing vested principal removes exactly its remaining stake weight (including during warm-up) and only the grantee decides when that weight leaves the pool.
 
 Warm-ups mature at their scheduled times even if nobody sends a transaction then. Adding a stake or grant never resets another lot's warm-up. Unallocated mining/boost reserves and unstake queues never count as weight.
 
@@ -101,7 +102,9 @@ The drip's remainder is `principal * exp(-activeSeconds / 8,640,000)`, evaluated
 
 Every weight change checkpoints both global and account rewards. `claimRewards(account)` pays only that account. Index division rounds down; per-account fractional wei are retained, and aggregate index dust is reported as `dustScaled`. Dust remains backed and has no rescue path.
 
-`checkpoint(maxEvents)` and `checkpointAccount(account, maxLots)` process up to **128** entries per call. Normal actions perform this work automatically. After very many unattended activations or stream endings, an action or preview can revert `CheckpointRequired`; call the maintenance methods repeatedly until they return true, then retry. Progress from maintenance calls persists. This keeps work bounded without making any user iterate over other accounts.
+`checkpoint(maxEvents)` and `checkpointAccount(account, maxLots)` process up to **128** entries per call. Normal actions perform this work automatically. After very many unattended activations or stream endings, a staking action or preview can revert `CheckpointRequired`; call the maintenance methods repeatedly until they return true, then retry. Progress from maintenance calls persists. This keeps work bounded without making any user iterate over other accounts.
+
+`depositRewards` and `depositDrip` never revert for maintenance, so the hook's swaps cannot fail because of a backlog: they attempt a bounded checkpoint of 16 events and then anchor the new stream or drip to the stored reward clock, which is never ahead of the true clock. In that rare case the deposit's 7-day window (or drip start) begins at the stored clock, so stakers of the not-yet-processed interval share it; the amount is fully conserved and no stream end is reordered.
 
 ## Forwarding
 
@@ -111,7 +114,7 @@ The vault approves only the requested flush amount, calls the specified game met
 
 ## Squeek boost
 
-Boost is dormant until the 12-hour activation has executed. Ethereum chain ID 1 and ERC-721 interface support are checked at schedule and execution. **TEAM's collection choice is the canonicality attestation**: ERC-721 has no universal onchain test for "canonical Squeek".
+Boost is dormant until the 12-hour activation has executed. Ethereum chain ID 1 and ERC-721 interface support are checked at schedule and execution. Until execution, TEAM may schedule a different collection, which replaces the pending one and restarts the 12-hour delay; the one-shot property binds at execution. **TEAM's collection choice is the canonicality attestation**: ERC-721 has no universal onchain test for "canonical Squeek".
 
 Owners call `registerNFT(tokenId)` without transferring the NFT. A registration applies only to windows starting at least **24 hours later**. A wallet may register multiple NFTs. Its **+50% of base entitlement** is split equally between its eligible NFTs per window; additional NFTs increase cap capacity, not the percentage. Each registration is capped at **10,000 HAMSTER per NFT per UTC day**, and all games together are capped at **100,000 per UTC day**. These are daily caps, not lifetime caps.
 
@@ -127,7 +130,7 @@ No claim can front-run the global cap or the 50M bucket. The final funded day sc
 
 Ownership is checked at registration, eligibility snapshot and claim. Anyone can invalidate a registration when ownership no longer matches; a new owner must register again and wait 24 hours. An observed and invalidated registration stays void even if the NFT returns. **An away-and-back transfer between observations cannot be detected using `ownerOf` alone.** The vault does not custody NFTs, inspect offchain transfer logs, or assume an unprovided NFT transfer hook. A transfer after payment cannot claw back an already created grant.
 
-If execution never activates boost within **365 days of vault deployment**, anyone can call `sweepDormantBoost()` once, including if a scheduled activation was abandoned. This moves 50M from the boost reserve to the mining reserve. It does **not** rewrite historical claims, restart halvings, or add an unspecified emission term: the requested curve still converges to **750M**, while the mining allocation becomes **800M**. The extra reserve therefore remains locked under this immutable curve. This distinction preserves both the fixed mining formula and the requested bucket transfer.
+If execution never activates boost within **365 days of vault deployment**, anyone can call `sweepDormantBoost()` once, including if a scheduled activation was abandoned. This moves 50M from the boost reserve into mining and makes it minable: the sweep records the effective global loss at that moment (`sweptLoss`, from finalized history) and, beyond that point, the remaining curve is scaled by `(800M - F(sweptLoss)) / (750M - F(sweptLoss))`, so the vault's curve (`vault.emissionCurve`, `boostEngine.extendedCurve`) converges to **800M**. Halving points, the base curve below the sweep point and every window finalized before the sweep are unchanged, so no historical claim is rewritten and claim order still does not matter. The `rate` reported by `currentMiningState()` includes the scaling. In the theoretical case that the base curve is already saturated (90 halvings) at the sweep, there is no remaining curve to scale and the 50M stays reserved.
 
 ## Site reads
 
@@ -136,7 +139,8 @@ If execution never activates boost within **365 days of vault deployment**, anyo
 | Base claim by game/window/account | `vault.claimable(game, k, account)` |
 | Budget, finalization-dependent daily scaling | `vault.windowBudget(game, k)` |
 | Claimed flag and reserved dust | `mined`, `windowAccounting`, `knownMiningDust` |
-| Global rate and halving | `currentMiningState()`, `rateAndHalving(globalLoss)`, `emissionCurve(loss)` |
+| Global rate and halving | `currentMiningState()`, `boostEngine.rateAndHalving(globalLoss)` (base), `emissionCurve(loss)` (in force), `boostEngine.emissionCurve(loss)` (base) |
+| New-game cap progress | `boostEngine.capStates(vault, game)`, `boostEngine.capDays(vault, game, day)` |
 | Grants and withdrawable vesting | `positionCounts(account)`, `grants(account,id)`, `vested(account,id)` minus withdrawn |
 | Stake and warm-up | `stakedBalance`, `grantBalance`, `lots(account,id)`, `activations(lot.activation)` |
 | Unstake requests | `positionCounts`, `unstakeQueue(account,id)` |
@@ -150,14 +154,15 @@ If execution never activates boost within **365 days of vault deployment**, anyo
 | Boost settings/day progress | `boostEngine.status(vault)`, `days_(vault, day)` |
 | NFTs and daily bonus | companion `registrationCount`, `registrations`, `registeredTokenCount`, `registeredTokens`, `walletRegistrationCount`, `walletRegistrations`, `claimable`, `demand`, `eligibleCount`, `dayRegistration` |
 
-Views of unfinalized, excluded, unresolved or capped-current-day windows revert with explicit errors instead of presenting a provisional claim as final. Arrays have public index getters and count views for pagination. Subscribe to both contracts' events; companion events include the vault namespace.
+Views of unfinalized, excluded or unresolved windows, and of capped windows whose UTC day is not fully finalized, revert with explicit errors instead of presenting a provisional claim as final. Arrays have public index getters and count views for pagination. Subscribe to both contracts' events; companion events include the vault namespace.
 
 ## Accounting and review assumptions
 
 - IMD and bound HAMSTER must be non-rebasing ERC-20s with exact transfers. Optional boolean return values are supported; false returns, transfer fees and callbacks attempting reentrancy revert. IMD amounts are in its existing 18-decimal units. The hook's trading tax must exempt or otherwise preserve exact vault transfers.
 - `hamsterLiability()` accounts for ungranted reserves, outstanding grants, deposited stakes and unstake queues. `imdLiability()` includes unspent rewards plus separate forwarding balances. Both equal the physical balances in the tests. Unsolicited token donations are excess, do not become stake/rewards, and cannot be rescued.
-- Registered games are trusted to report honest immutable loss history and to implement the declared IMD recipient behavior. Checks and timelocks cannot prove these semantic properties.
+- Registered games are trusted to report honest immutable loss history, to finalize permissionlessly and to implement the declared IMD recipient behavior. Checks and timelocks cannot prove these semantic properties.
+- Boost day preparation enumerates every registered NFT (8 per call, resumable, never paid). Large collections make each day cost many unpaid calls; this is an accepted operational cost for the site's keepers, not a loss of funds, and days are claimable once prepared.
 - Mainnet timestamp boundaries are by block timestamp, with the ordinary small validator discretion. No randomness or price oracle is used by the vault.
 - The review in this repository is a local implementation review, not an independent security audit. The launch network's independent review should examine game selection, canonical collection choice, the documented sweep interpretation, companion linkage and launch-2 transfer compatibility before release.
 
-Test coverage includes retroactivity, halving crossings and saturation, overlapping switch backlogs, deterministic caps and claim permutations, conservation, full boost-bucket exhaustion, vesting stake, automatic warm-ups, cancellation/unstake delays, zero-weight pauses, concurrent streams, anchored drip, actual-v2 integration, forwarding across switches, bind failures, boost ownership invalidation and multi-NFT allocation, timelocks, the 365-day sweep, bounded maintenance, token failure/reentrancy, empty-chain construction, runtime size and the protected opcode policy.
+Test coverage includes retroactivity, halving crossings and saturation, overlapping switch backlogs, deterministic caps with deferral across a halving and a further switch, claim permutations, conservation, full boost-bucket exhaustion, vesting stake, automatic warm-ups, cancellation/unstake delays, zero-weight pauses, concurrent streams, anchored drip, actual-v2 integration, forwarding across switches, bind failures and donated excess at bind, grantee-only vested withdrawal, hook deposits under a maintenance backlog, boost rescheduling, the mining view during an unresolved switch, boost ownership invalidation and multi-NFT allocation, timelocks, the 365-day sweep, bounded maintenance, token failure/reentrancy, empty-chain construction, runtime size and the protected opcode policy.

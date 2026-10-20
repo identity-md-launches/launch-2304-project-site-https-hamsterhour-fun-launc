@@ -12,6 +12,7 @@ abstract contract HamsterStaking is VaultBase {
     uint256 public constant GAME_STREAM = 30 days;
     uint256 public constant RAY = 1e27;
     uint256 public constant MAX_CHECKPOINT = 128;
+    uint256 internal constant DEPOSIT_CHECKPOINT = 16;
 
     struct RewardState {
         uint256 wallTime;
@@ -91,6 +92,7 @@ abstract contract HamsterStaking is VaultBase {
 
     error CheckpointRequired();
     error WrongLot();
+    error NotAccount();
 
     event Staked(address indexed account, uint256 indexed lot, uint256 amount, uint256 earnsAt);
     event GrantCreated(address indexed account, uint256 indexed grant, uint256 amount, uint256 startsAt);
@@ -285,7 +287,9 @@ abstract contract HamsterStaking is VaultBase {
         return M.mulDiv(g.amount, M.min(block.timestamp - g.startsAt, VESTING), VESTING);
     }
 
+    /// @notice Only the grantee decides when vested principal leaves the stake-weight pool.
     function withdrawVested(address account, uint256[] calldata ids) external guarded returns (uint256 amount) {
+        if (account != msg.sender) revert NotAccount();
         if (ids.length == 0 || ids.length > MAX_BATCH) revert TooMany();
         _ready(account);
         for (uint256 i; i < ids.length; ++i) {
@@ -326,14 +330,16 @@ abstract contract HamsterStaking is VaultBase {
         emit StreamFunded(msg.sender, amount, duration);
     }
 
+    /// @dev Hook deposits never revert for maintenance: a bounded checkpoint is attempted, and the
+    /// stream is anchored to the stored reward clock, which is never ahead of the true one.
     function depositRewards(uint256 amount) external guarded {
-        _readyGlobal();
+        _checkpoint(DEPOSIT_CHECKPOINT);
         _pull(IMD, msg.sender, amount);
         _stream(amount, false);
     }
 
     function depositDrip(uint256 amount) external guarded {
-        _readyGlobal();
+        _checkpoint(DEPOSIT_CHECKPOINT);
         _pull(IMD, msg.sender, amount);
         _reward.dripPrincipal = _reward.dripPrincipal - _reward.dripReleased + amount;
         _reward.dripReleased = 0;

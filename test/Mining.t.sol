@@ -112,7 +112,7 @@ contract MiningTest is VaultTestBase {
         assertEq(vault.emissionCurve(18_750 ether), 375_000_000 ether);
         assertEq(vault.emissionCurve(37_500 ether), 562_500_000 ether);
         assertEq(vault.emissionCurve(type(uint256).max), 750_000_000 ether);
-        (uint256 rate, uint256 halving) = vault.rateAndHalving(37_500 ether);
+        (uint256 rate, uint256 halving) = boost.rateAndHalving(37_500 ether);
         assertEq(rate, 5_000 ether);
         assertEq(halving, 2);
     }
@@ -197,7 +197,7 @@ contract MiningTest is VaultTestBase {
         (, ready, genesis, at, first, end, local, global, previous) = vault.games(which);
     }
 
-    function test_newGameDailyCapScalesEveryWindowAndExpires() public {
+    function test_newGameDailyCapScalesEveryWindowAndDefersTheRest() public {
         MockGame next = new MockGame(GENESIS);
         uint256 switchTime = _switch(next);
         uint256 day = switchTime / 1 days + 1;
@@ -208,7 +208,7 @@ contract MiningTest is VaultTestBase {
         next.setLoss(uncapped, alice, 200 ether);
         vm.warp(day * 1 days + 3 hours);
         _resolve(next);
-        vm.expectRevert(HamsterBoost.NotReady.selector);
+        vm.expectRevert(HamsterBoost.NotFinalized.selector);
         vault.claimMined(address(next), one(first), alice);
         // The last window starts at 23:20 and ends at 00:20 in the v2 timetable.
         vm.warp((day + 1) * 1 days + 1 hours);
@@ -217,12 +217,83 @@ contract MiningTest is VaultTestBase {
         assertEq(vault.claimMined(address(next), one(first + 1), bob), 1_000_000 ether);
         assertEq(vault.claimMined(address(next), one(first), alice), 1_000_000 ether);
         assertTrue(vm.revertToStateAndDelete(snapshot));
+        // Anyone may cache the capped days first; the result is identical.
+        (bool complete,) = boost.prepareCap(address(vault), address(next), 2);
+        assertFalse(complete);
+        (bool ready,, uint256 lossStart, uint256 raw, uint256 allowance) =
+            boost.capDays(address(vault), address(next), day);
+        assertTrue(ready);
+        assertEq(lossStart, 0);
+        assertEq(raw, 8_000_000 ether);
+        assertEq(allowance, 2_000_000 ether);
         assertEq(vault.claimMined(address(next), one(first), alice), 1_000_000 ether);
         assertEq(vault.claimMined(address(next), one(first + 1), bob), 1_000_000 ether);
+        // The curve advanced only by the 100 IMD worth of loss that was actually paid.
+        (uint256 globalLoss,,) = vault.currentMiningState();
+        assertEq(globalLoss, 100 ether);
+        assertEq(vault.emissionCurve(globalLoss), vault.miningCommitted());
         vm.warp(uint256(GENESIS) + (uncapped + 1) * 1 hours);
         next.finalize(1000);
         assertEq(vault.claimMined(address(next), one(uncapped), alice), 4_000_000 ether);
+        (,,, uint256 dropped) = vault_capState(address(next));
+        assertEq(dropped, 300 ether);
+        (globalLoss,,) = vault.currentMiningState();
+        assertEq(globalLoss, 300 ether);
+        assertEq(vault.emissionCurve(globalLoss), vault.miningCommitted());
         _conservation();
+    }
+
+    function vault_capState(address which) internal view returns (bool, uint256, uint256, uint256) {
+        return boost.capStates(address(vault), which);
+    }
+
+    function test_newGameCapCrossingHalvingKeepsCurveConsistentAndChainsToNextGame() public {
+        MockGame next = new MockGame(GENESIS);
+        uint256 switchTime = _switch(next);
+        uint256 day = switchTime / 1 days + 1;
+        uint256 first = (day * 1 days - GENESIS + 1 hours - 1) / 1 hours;
+        // 20,000 IMD in one capped window crosses the first halving: raw 375M + 625M/18750*1250.
+        next.setLoss(first, alice, 20_000 ether);
+        next.setLoss(first + 30, bob, 100 ether);
+        vm.warp((day + 2) * 1 days + 1 hours);
+        _resolve(next);
+        assertEq(vault.claimMined(address(next), one(first), alice), 2_000_000 ether);
+        // Finalized history already includes bob's window: 100 IMD consumed on each day.
+        (uint256 globalLoss, uint256 rate, uint256 halving) = vault.currentMiningState();
+        assertEq(globalLoss, 200 ether);
+        assertEq(halving, 0);
+        assertEq(rate, 20_000 ether);
+        // The following capped day resumed at full rate because only 100 IMD were consumed.
+        assertEq(vault.claimMined(address(next), one(first + 30), bob), 2_000_000 ether);
+        assertEq(vault.emissionCurve(200 ether), vault.miningCommitted());
+        // A further switch chains the effective position, not the raw cumulative loss.
+        MockGame third = new MockGame(GENESIS);
+        uint256 thirdSwitch = _switch(third);
+        uint256 k = (thirdSwitch - GENESIS + 1 hours - 1) / 1 hours;
+        third.setLoss(k, carol, 1 ether);
+        vm.warp(uint256(GENESIS) + (k + 1) * 1 hours);
+        next.finalize(10_000);
+        third.finalize(10_000);
+        vault.resolveGame(address(third));
+        (,,,,,, uint256 globalOrigin,) = _gameRange(address(third));
+        assertEq(globalOrigin, 200 ether);
+        (bool complete, uint256 dropped) = boost.prepareCap(address(vault), address(next), 16);
+        assertTrue(complete);
+        assertEq(dropped, 19_900 ether);
+        _conservation();
+    }
+
+    function test_miningStateFallsBackToOutgoingGameWhileSuccessorUnresolved() public {
+        game.setLoss(0, alice, 5 ether);
+        game.finalize(1);
+        MockGame next = new MockGame(GENESIS);
+        _switch(next);
+        (, bool ready,,,,,,,) = vault.games(address(next));
+        assertFalse(ready);
+        (uint256 globalLoss, uint256 rate, uint256 halving) = vault.currentMiningState();
+        assertEq(globalLoss, 5 ether);
+        assertEq(rate, 20_000 ether);
+        assertEq(halving, 0);
     }
 
     function test_switchTwiceChainsFinalRanges() public {

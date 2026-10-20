@@ -14,7 +14,7 @@ Every external mutation of the vault has the same reentrancy guard. Asset calls 
 
 ## Accounting and ordering
 
-Mining uses finalized global loss intervals and integral differences rather than subtracting an amount from a first-come pool. A successor origin is fixed only after both relevant prefixes are final. Window budgets are reserved before granting shares. Daily caps use the entire finalized day. Overcommitment and cumulative/share inconsistencies revert.
+Mining uses finalized global loss intervals and integral differences rather than subtracting an amount from a first-come pool. A successor origin is fixed only after both relevant prefixes are final. Window budgets are reserved before granting shares. Daily caps use the entire finalized day and advance the curve only by what they pay, so capped emission is deferred rather than forfeited. Overcommitment and cumulative/share inconsistencies revert.
 
 Boost reservations advance in day order, separately from claims. A bounded first pass snapshots eligible NFT counts; a second pass fixes capped demands and reserves the daily budget. Enumeration visits each unique registered NFT once, so transferring and re-registering one token cannot inflate daily work with its registration history. Multiple NFTs share the wallet's 50% bonus. Later ownership invalidation cannot increase another claimant's amount. The 502-day fixture exercises the complete 50M reserve, its partially funded last day and exhaustion without requiring a long wall-clock wait.
 
@@ -26,7 +26,7 @@ Linear streams preserve each deposit's end and fixed amount. Drip uses an anchor
 
 - Direct compatible games must provide honest immutable sequential loss history. Interface validation cannot establish that semantic property; the TEAM game-selection power is a substantive trust assumption.
 - Canonical NFT identity is attested by TEAM's timelocked selection. `ownerOf` checks cannot discover a transfer away and back between observations. This is explicitly documented, and observed invalidation is permanent.
-- The dormant boost sweep changes reserve classification. The immutable prescribed mining curve still has a 750M asymptote; no new 50M emission curve was invented.
+- The dormant boost sweep scales the curve beyond the finalized global loss at the sweep so it converges to 800M; the base curve, halving points and all previously finalized windows are unchanged.
 - With many queued events, users need several permissionless checkpoint transactions. Boost preparation may need several calls per day and older unresolved game history can delay it. Base mining does not depend on boost preparation.
 - Unsolicited asset donations and rounding/voided entitlements have no administrative recovery path.
 - Tests use actual v2 source with locally signed fixture attestations; they do not claim to verify a live mainnet attestation or canonical NFT deployment.

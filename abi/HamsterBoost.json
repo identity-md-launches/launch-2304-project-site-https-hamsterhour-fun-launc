@@ -40,6 +40,94 @@
   },
   {
     "type": "function",
+    "name": "capDays",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "ready",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "pos",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "lossStart",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "raw",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "allowance",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "capStates",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "complete",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "nextDay",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "pos",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "dropped",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "checkGame",
     "inputs": [
       {
@@ -381,6 +469,30 @@
   },
   {
     "type": "function",
+    "name": "extendedCurve",
+    "inputs": [
+      {
+        "name": "vault",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "loss",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "invalidate",
     "inputs": [
       {
@@ -428,6 +540,64 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "prepareCap",
+    "inputs": [
+      {
+        "name": "vault",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "game",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "maxDays",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "complete",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "dropped",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "rateAndHalving",
+    "inputs": [
+      {
+        "name": "globalLoss",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "rate",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "halving",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "pure"
   },
   {
     "type": "function",
@@ -604,6 +774,11 @@
             "internalType": "bool"
           },
           {
+            "name": "sweptLoss",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
             "name": "nextDay",
             "type": "uint256",
             "internalType": "uint256"
@@ -762,6 +937,43 @@
   },
   {
     "type": "event",
+    "name": "CapDayPrepared",
+    "inputs": [
+      {
+        "name": "vault",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "game",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "day",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "raw",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "allowance",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "Claimed",
     "inputs": [
       {
@@ -899,6 +1111,12 @@
         "type": "address",
         "indexed": true,
         "internalType": "address"
+      },
+      {
+        "name": "sweptLoss",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false

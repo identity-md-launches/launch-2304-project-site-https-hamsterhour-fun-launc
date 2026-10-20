@@ -44,15 +44,21 @@ contract StakingTest is VaultTestBase {
         uint256 due = vault.vested(alice, 0);
         uint256 before_ = hamster.balanceOf(alice);
         vm.prank(carol);
+        vm.expectRevert(HamsterStaking.NotAccount.selector);
+        vault.withdrawVested(alice, one(0));
+        assertEq(vault.rewardState().weight, 40_000 ether);
+        vm.prank(alice);
         assertEq(vault.withdrawVested(alice, one(0)), due);
         assertEq(hamster.balanceOf(alice), before_ + due);
         assertEq(vault.rewardState().weight, 40_000 ether - due);
         assertEq(vault.grantBalance(alice), 20_000 ether - due);
         vm.warp(start + 10 days);
         assertEq(vault.vested(alice, 0), 20_000 ether);
+        vm.prank(alice);
         vault.withdrawVested(alice, one(0));
         assertEq(vault.grantBalance(alice), 0);
         assertEq(vault.rewardState().weight, 20_000 ether);
+        vm.prank(alice);
         vm.expectRevert(VaultBase.InvalidAmount.selector);
         vault.withdrawVested(alice, one(0));
         _conservation();
@@ -65,6 +71,7 @@ contract StakingTest is VaultTestBase {
         _stake(alice, 100 ether);
         uint256 start = vm.getBlockTimestamp();
         vm.warp(start + 12 hours);
+        vm.prank(alice);
         uint256 withdrawn = vault.withdrawVested(alice, one(0));
         assertEq(vault.rewardState().weight, 0);
         vm.warp(start + 1 days);
@@ -338,6 +345,29 @@ contract StakingTest is VaultTestBase {
         assertApproxEqAbs(vault.pendingIMD(bob), expectedB, 2);
         vault.claimRewards(alice);
         vault.claimRewards(bob);
+        _conservation();
+    }
+
+    function test_hookDepositsNeverRevertForMaintenanceAndConserveFunds() public {
+        _stake(alice, 1 ether);
+        vm.warp(vm.getBlockTimestamp() + 1 days);
+        // A burst of hook deposits at distinct seconds creates more than 128 stream ends.
+        for (uint256 i; i < 140; ++i) {
+            vault.depositRewards(1 ether);
+            vm.warp(vm.getBlockTimestamp() + 12 seconds);
+        }
+        // All of them mature during a quiet week; the next hook deposit must still succeed.
+        vm.warp(vm.getBlockTimestamp() + 7 days + 1 hours);
+        vm.expectRevert(HamsterStaking.CheckpointRequired.selector);
+        vault.pendingIMD(alice);
+        vault.depositRewards(1 ether);
+        vault.depositDrip(2 ether);
+        while (!vault.checkpoint(128)) {}
+        vm.warp(vm.getBlockTimestamp() + 8 days);
+        assertTrue(vault.checkpoint(128));
+        // The burst and the late stream were fully distributed to the only staker.
+        assertApproxEqAbs(vault.pendingIMD(alice), 141 ether + vault.rewardState().dripEmitted, 141);
+        vault.claimRewards(alice);
         _conservation();
     }
 }

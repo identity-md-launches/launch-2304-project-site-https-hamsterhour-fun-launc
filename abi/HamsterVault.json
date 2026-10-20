@@ -1293,30 +1293,6 @@
   },
   {
     "type": "function",
-    "name": "rateAndHalving",
-    "inputs": [
-      {
-        "name": "globalLoss",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "rate",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "halving",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "pure"
-  },
-  {
-    "type": "function",
     "name": "registerNFT",
     "inputs": [
       {
@@ -2375,6 +2351,11 @@
   {
     "type": "error",
     "name": "InvalidInterface",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotAccount",
     "inputs": []
   },
   {

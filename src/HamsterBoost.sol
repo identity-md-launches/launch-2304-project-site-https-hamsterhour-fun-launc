@@ -55,6 +55,7 @@ contract HamsterBoost {
         uint256 readyAt;
         address collection;
         bool swept;
+        uint256 sweptLoss; // Effective global loss when swept; the curve extends from here.
         uint256 nextDay;
         uint256 committed;
         uint256 granted;
@@ -99,6 +100,26 @@ contract HamsterBoost {
     mapping(address => mapping(uint256 => mapping(uint256 => uint256))) public dayRegistration;
     mapping(address => mapping(uint256 => mapping(address => mapping(uint256 => uint256)))) public eligibleCount;
 
+    /// @dev Sequential new-game cap accounting per (vault, game). `pos` is the effective global
+    /// curve position after every prepared day; `dropped` is loss the cap left unconsumed.
+    struct CapState {
+        bool complete;
+        uint256 nextDay;
+        uint256 pos;
+        uint256 dropped;
+    }
+
+    struct CapDay {
+        bool ready;
+        uint256 pos; // Effective global position at the day's first capped window.
+        uint256 lossStart; // Local cumulative loss before that window.
+        uint256 raw; // Sum of uncapped window budgets.
+        uint256 allowance; // Amount actually emitted: min(raw, 2M) on the curve.
+    }
+
+    mapping(address => mapping(address => CapState)) public capStates;
+    mapping(address => mapping(address => mapping(uint256 => CapDay))) public capDays;
+
     error AlreadyDone();
     error NotReady();
     error InvalidCollection();
@@ -121,7 +142,10 @@ contract HamsterBoost {
     event Claimed(
         address indexed vault, uint256 indexed day, uint256 indexed registration, address account, uint256 amount
     );
-    event Swept(address indexed vault);
+    event Swept(address indexed vault, uint256 sweptLoss);
+    event CapDayPrepared(
+        address indexed vault, address indexed game, uint256 indexed day, uint256 raw, uint256 allowance
+    );
 
     function status(address vault) external view returns (State memory) {
         return _states[vault];
@@ -136,7 +160,7 @@ contract HamsterBoost {
     /// @dev Only the vault can create a commitment in the vault's namespace. Its wrapper checks TEAM.
     function schedule(address collection_) external {
         State storage s = _states[msg.sender];
-        if (s.collection != address(0) || s.pendingCollection != address(0) || s.swept) revert AlreadyDone();
+        if (s.collection != address(0) || s.swept) revert AlreadyDone();
         if (block.timestamp + 12 hours >= IMiningView(msg.sender).deployedAt() + 365 days) revert NotReady();
         _checkCollection(collection_);
         s.pendingCollection = collection_;
@@ -161,9 +185,11 @@ contract HamsterBoost {
         State storage s = _states[msg.sender];
         if (block.timestamp < IMiningView(msg.sender).deployedAt() + 365 days) revert NotReady();
         if (s.collection != address(0) || s.swept) revert AlreadyDone();
+        (uint256 globalLoss,,) = _miningState(msg.sender);
         s.swept = true;
+        s.sweptLoss = globalLoss;
         delete s.pendingCollection;
-        emit Swept(msg.sender);
+        emit Swept(msg.sender, globalLoss);
     }
 
     function register(address account, uint256 tokenId) external returns (uint256 id) {
@@ -236,6 +262,7 @@ contract HamsterBoost {
             uint256 first = g.first;
             uint256 end = g.end;
             if (switchedAt >= (day + 1) * 1 days) break;
+            if (g.previous != address(0)) _advanceCap(vault, game, 16);
             uint256 dayFirst = _firstAt(genesis, day * 1 days);
             if (dayFirst > first) first = dayFirst;
             end = M.min(end, _firstAt(genesis, (day + 1) * 1 days));
@@ -375,24 +402,43 @@ contract HamsterBoost {
         return MINING_ALLOCATION - remaining + M.mulDiv(band, loss % HALF_LOSS, HALF_LOSS);
     }
 
-    function currentMiningState(address vault)
-        external
-        view
-        returns (uint256 globalLoss, uint256 rate, uint256 halving)
-    {
-        address game = IMiningView(vault).currentGame();
-        IMiningView.GameData memory g = IMiningView(vault).games(game);
-        if (!g.rangeReady) revert NotReady();
-        uint256 end = M.min(IHamsterGame(game).nextFinalizeWindow(), g.end);
-        uint256 localEnd = end <= g.first ? g.localOrigin : IHamsterGame(game).cumulativeLossAfter(end - 1);
-        if (localEnd < g.localOrigin) revert BadLossHistory();
-        globalLoss = g.globalOrigin + (localEnd - g.localOrigin);
-        halving = globalLoss / HALF_LOSS;
-        rate = halving >= 256 ? 0 : (20_000 ether >> halving);
+    /// @dev The curve that applies to a vault. After a dormant-boost sweep the part of the curve
+    /// beyond the sweep point is scaled so that it converges to 800M instead of 750M. Halving
+    /// points are unchanged and everything already emitted is unchanged.
+    function _curve(State memory s, uint256 loss) internal pure returns (uint256) {
+        uint256 f = emissionCurve(loss);
+        if (!s.swept || loss <= s.sweptLoss) return f;
+        uint256 f0 = emissionCurve(s.sweptLoss);
+        uint256 room = MINING_ALLOCATION - f0;
+        if (room == 0) return f;
+        return f0 + M.mulDiv(f - f0, room + ALLOCATION, room);
     }
 
-    function _rawBudget(address vault, address game, uint256 k) internal view returns (uint256 budget, uint256 total) {
-        IMiningView.GameData memory g = IMiningView(vault).games(game);
+    function extendedCurve(address vault, uint256 loss) external view returns (uint256) {
+        return _curve(_states[vault], loss);
+    }
+
+    /// @dev A loss whose extended emission does not exceed `emission` (the largest one up to the
+    /// rounding of the curve itself). Saturated emission maps to the first saturated loss.
+    function _inverse(State memory s, uint256 emission) internal pure returns (uint256) {
+        if (s.swept && emission > emissionCurve(s.sweptLoss)) {
+            uint256 f0 = emissionCurve(s.sweptLoss);
+            uint256 room = MINING_ALLOCATION - f0;
+            if (room != 0) emission = f0 + M.mulDiv(emission - f0, room, room + ALLOCATION);
+        }
+        if (emission >= MINING_ALLOCATION) return 90 * HALF_LOSS;
+        uint256 h;
+        while (MINING_ALLOCATION - (MINING_ALLOCATION >> (h + 1)) <= emission) ++h;
+        uint256 band = (MINING_ALLOCATION >> h) - (MINING_ALLOCATION >> (h + 1));
+        uint256 within = emission - (MINING_ALLOCATION - (MINING_ALLOCATION >> h));
+        return h * HALF_LOSS + M.mulDiv(within, HALF_LOSS, band);
+    }
+
+    function _lossRange(address game, IMiningView.GameData memory g, uint256 k)
+        internal
+        view
+        returns (uint256 before_, uint256 total)
+    {
         if (!g.registered) revert UnknownGame();
         if (!g.rangeReady) revert NotReady();
         if (k < g.first || k >= g.end) revert ExcludedWindow();
@@ -402,7 +448,7 @@ contract HamsterBoost {
             source.windowStart(k) != uint256(g.genesis) + k * 1 hours
                 || source.windowEnd(k) != uint256(g.genesis) + (k + 1) * 1 hours
         ) revert InvalidInterface();
-        uint256 before_ = source.cumulativeLossBefore(k);
+        before_ = source.cumulativeLossBefore(k);
         uint256 after_ = source.cumulativeLossAfter(k);
         total = source.totalEligibleLoss(k);
         if (
@@ -410,8 +456,6 @@ contract HamsterBoost {
                 || (k == g.first && before_ != g.localOrigin)
                 || (k > g.first && before_ != source.cumulativeLossAfter(k - 1))
         ) revert BadLossHistory();
-        budget = emissionCurve(g.globalOrigin + (after_ - g.localOrigin))
-            - emissionCurve(g.globalOrigin + (before_ - g.localOrigin));
     }
 
     function _dayBounds(IMiningView.GameData memory g, uint256 day) internal pure returns (uint256 first, uint256 end) {
@@ -421,6 +465,197 @@ contract HamsterBoost {
         if (end < first) end = first;
     }
 
+    /// @dev First window of a successor that is outside its 14-day cap period.
+    function _capEnd(IMiningView.GameData memory g) internal pure returns (uint256) {
+        return M.min(g.end, _firstAt(g.genesis, uint256(g.switchedAt) + NEW_GAME_PERIOD));
+    }
+
+    function _capDayBounds(IMiningView.GameData memory g, uint256 day)
+        internal
+        pure
+        returns (uint256 first, uint256 end)
+    {
+        (first, end) = _dayBounds(g, day);
+        end = M.min(end, _capEnd(g));
+        if (end < first) end = first;
+    }
+
+    function _capState(address vault, address game, IMiningView.GameData memory g)
+        internal
+        view
+        returns (CapState memory c)
+    {
+        c = capStates[vault][game];
+        if (c.nextDay == 0) {
+            c.nextDay = uint256(g.switchedAt) / 1 days;
+            c.pos = g.globalOrigin;
+        }
+    }
+
+    /// @dev Evaluate one capped UTC day from finalized history only. A day whose raw emission
+    /// exceeds 2M pays exactly the curve segment worth 2M and leaves the rest of its loss
+    /// unconsumed, so the curve resumes from there and nothing is forfeited.
+    function _nextCapDay(address game, IMiningView.GameData memory g, State memory s, CapState memory c)
+        internal
+        view
+        returns (CapDay memory d)
+    {
+        (uint256 first, uint256 end) = _capDayBounds(g, c.nextDay);
+        d.ready = true;
+        d.pos = c.pos;
+        uint256 p = c.pos;
+        if (first < end) d.lossStart = IHamsterGame(game).cumulativeLossBefore(first);
+        for (uint256 k = first; k < end; ++k) {
+            (, uint256 total) = _lossRange(game, g, k);
+            d.raw += _curve(s, p + total) - _curve(s, p);
+            p += total;
+        }
+        if (d.raw <= NEW_GAME_DAILY_CAP) {
+            d.allowance = d.raw;
+            c.pos = p;
+        } else {
+            uint256 target = _inverse(s, _curve(s, c.pos) + NEW_GAME_DAILY_CAP);
+            uint256 x = target > c.pos ? target - c.pos : 0;
+            d.allowance = _curve(s, c.pos + x) - _curve(s, c.pos);
+            c.dropped += (p - c.pos) - x;
+            c.pos += x;
+        }
+        ++c.nextDay;
+        if (_firstAt(g.genesis, c.nextDay * 1 days) >= _capEnd(g)) c.complete = true;
+    }
+
+    function _advanceCap(address vault, address game, uint256 maxDays) internal returns (CapState memory c) {
+        IMiningView.GameData memory g = IMiningView(vault).games(game);
+        if (!g.registered) revert UnknownGame();
+        if (g.previous == address(0)) {
+            c.complete = true;
+            return c;
+        }
+        if (!g.rangeReady) revert NotReady();
+        State memory s = _states[vault];
+        c = _capState(vault, game, g);
+        uint256 nextFinalize = IHamsterGame(game).nextFinalizeWindow();
+        for (uint256 i; i < maxDays && !c.complete; ++i) {
+            (, uint256 end) = _capDayBounds(g, c.nextDay);
+            if (nextFinalize < end) break;
+            uint256 day = c.nextDay;
+            CapDay memory d = _nextCapDay(game, g, s, c);
+            capDays[vault][game][day] = d;
+            emit CapDayPrepared(vault, game, day, d.raw, d.allowance);
+        }
+        capStates[vault][game] = c;
+    }
+
+    /// @notice Cache a successor's capped days for any vault. Permissionless: the result is a
+    /// function of finalized history only. Bounded and resumable; stops at the first day whose
+    /// windows are not all finalized.
+    function prepareCap(address vault, address game, uint256 maxDays)
+        external
+        returns (bool complete, uint256 dropped)
+    {
+        if (maxDays == 0 || maxDays > 16) revert TooMany();
+        CapState memory c = _advanceCap(vault, game, maxDays);
+        return (c.complete, c.dropped);
+    }
+
+    function _capDayView(address vault, address game, IMiningView.GameData memory g, State memory s, uint256 day)
+        internal
+        view
+        returns (CapDay memory d)
+    {
+        d = capDays[vault][game][day];
+        if (d.ready) return d;
+        CapState memory c = _capState(vault, game, g);
+        if (day < c.nextDay) revert ExcludedWindow();
+        while (true) {
+            d = _nextCapDay(game, g, s, c);
+            if (c.nextDay - 1 == day) return d;
+        }
+    }
+
+    function _droppedView(address vault, address game, IMiningView.GameData memory g, State memory s)
+        internal
+        view
+        returns (uint256)
+    {
+        CapState memory c = _capState(vault, game, g);
+        while (!c.complete) _nextCapDay(game, g, s, c);
+        return c.dropped;
+    }
+
+    /// @notice Effective global loss consumed by the curve through window `end` (exclusive).
+    function _effectiveLoss(address vault, address game, IMiningView.GameData memory g, State memory s, uint256 end)
+        internal
+        view
+        returns (uint256)
+    {
+        uint256 localEnd = end <= g.first ? g.localOrigin : IHamsterGame(game).cumulativeLossAfter(end - 1);
+        if (localEnd < g.localOrigin) revert BadLossHistory();
+        if (g.previous == address(0)) return g.globalOrigin + (localEnd - g.localOrigin);
+        CapState memory c = _capState(vault, game, g);
+        while (!c.complete) {
+            (, uint256 dayEnd) = _capDayBounds(g, c.nextDay);
+            if (dayEnd > end) break;
+            _nextCapDay(game, g, s, c);
+        }
+        if (c.complete) return g.globalOrigin + (localEnd - g.localOrigin) - c.dropped;
+        (uint256 first,) = _capDayBounds(g, c.nextDay);
+        return end > first ? c.pos + (localEnd - IHamsterGame(game).cumulativeLossBefore(first)) : c.pos;
+    }
+
+    function _miningState(address vault) internal view returns (uint256 globalLoss, uint256 rate, uint256 halving) {
+        IMiningView v = IMiningView(vault);
+        address game = v.currentGame();
+        IMiningView.GameData memory g = v.games(game);
+        if (!g.rangeReady) {
+            // Report the finalized history of the outgoing game until the successor is resolved.
+            game = g.previous;
+            g = v.games(game);
+        }
+        State memory s = _states[vault];
+        uint256 end = M.min(IHamsterGame(game).nextFinalizeWindow(), g.end);
+        globalLoss = _effectiveLoss(vault, game, g, s, end);
+        halving = globalLoss / HALF_LOSS;
+        rate = halving >= 256 ? 0 : (20_000 ether >> halving);
+        if (s.swept && globalLoss >= s.sweptLoss) {
+            uint256 room = MINING_ALLOCATION - emissionCurve(s.sweptLoss);
+            if (room != 0) rate = M.mulDiv(rate, room + ALLOCATION, room);
+        }
+    }
+
+    function currentMiningState(address vault)
+        external
+        view
+        returns (uint256 globalLoss, uint256 rate, uint256 halving)
+    {
+        return _miningState(vault);
+    }
+
+    /// @notice Base rate and halving index at a global loss, before any sweep extension.
+    function rateAndHalving(uint256 globalLoss) external pure returns (uint256 rate, uint256 halving) {
+        halving = globalLoss / HALF_LOSS;
+        rate = halving >= 256 ? 0 : (20_000 ether >> halving);
+    }
+
+    function _rawBudget(address vault, address game, uint256 k) internal view returns (uint256 budget, uint256 total) {
+        IMiningView.GameData memory g = IMiningView(vault).games(game);
+        uint256 before_;
+        (before_, total) = _lossRange(game, g, k);
+        State memory s = _states[vault];
+        uint256 pos;
+        if (g.previous == address(0)) {
+            pos = g.globalOrigin + (before_ - g.localOrigin);
+        } else if (k < _capEnd(g)) {
+            CapDay memory d = _capDayView(vault, game, g, s, (uint256(g.genesis) + k * 1 hours) / 1 days);
+            pos = d.pos + (before_ - d.lossStart);
+            uint256 raw = _curve(s, pos + total) - _curve(s, pos);
+            return (d.raw == 0 ? 0 : M.mulDiv(d.allowance, raw, d.raw), total);
+        } else {
+            pos = g.globalOrigin + (before_ - g.localOrigin) - _droppedView(vault, game, g, s);
+        }
+        budget = _curve(s, pos + total) - _curve(s, pos);
+    }
+
     function windowBudget(address vault, address game, uint256 k)
         external
         view
@@ -428,19 +663,6 @@ contract HamsterBoost {
     {
         (budget, total) = _rawBudget(vault, game, k);
         (bool prepared, uint256 cachedBudget,,,,) = IMiningView(vault).windowAccounting(game, k);
-        if (prepared) return (cachedBudget, total);
-        IMiningView.GameData memory g = IMiningView(vault).games(game);
-        uint256 startsAt = uint256(g.genesis) + k * 1 hours;
-        if (g.previous == address(0) || startsAt >= uint256(g.switchedAt) + NEW_GAME_PERIOD) return (budget, total);
-        uint256 day = startsAt / 1 days;
-        if (block.timestamp < (day + 1) * 1 days) revert NotReady();
-        (uint256 first, uint256 end) = _dayBounds(g, day);
-        end = M.min(end, _firstAt(g.genesis, uint256(g.switchedAt) + NEW_GAME_PERIOD));
-        uint256 sum;
-        for (uint256 i = first; i < end; ++i) {
-            (uint256 raw,) = _rawBudget(vault, game, i);
-            sum += raw;
-        }
-        if (sum > NEW_GAME_DAILY_CAP) budget = M.mulDiv(budget, NEW_GAME_DAILY_CAP, sum);
+        if (prepared) budget = cachedBudget;
     }
 }

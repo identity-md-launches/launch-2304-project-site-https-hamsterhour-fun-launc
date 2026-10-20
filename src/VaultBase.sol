@@ -53,7 +53,7 @@ abstract contract VaultBase {
         if (token_ == IMD || token_.code.length == 0) revert InvalidAddress();
         if (
             IToken(token_).totalSupply() != 1_000_000_000 ether
-                || IToken(token_).balanceOf(address(this)) != 800_000_000 ether || IToken(token_).decimals() != 18
+                || IToken(token_).balanceOf(address(this)) < 800_000_000 ether || IToken(token_).decimals() != 18
         ) revert InvalidAmount();
         token = token_;
         emit TokenBound(token_);

@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {VaultTestBase, VaultBase, HamsterMining, MockGame} from "./helpers/VaultTestBase.sol";
+import {
+    VaultTestBase,
+    VaultBase,
+    HamsterMining,
+    HamsterVault,
+    HamsterBoost,
+    MockGame,
+    MockToken
+} from "./helpers/VaultTestBase.sol";
 
 contract ForwardingTest is VaultTestBase {
     function test_queuedFundsFollowCurrentGameAfterSwitch() public {
@@ -82,5 +90,31 @@ contract ForwardingTest is VaultTestBase {
         vm.clearMockedCalls();
         vault.flushJackpot(100 ether);
         _conservation();
+    }
+
+    function test_bindAcceptsDonatedExcessButNotShortfallOrWrongSupply() public {
+        HamsterBoost engine = new HamsterBoost();
+        HamsterVault fresh = new HamsterVault(TEAM, address(engine));
+        MockToken token = new MockToken();
+        token.mint(address(fresh), 800_000_000 ether - 1);
+        token.mint(alice, 200_000_000 ether + 1);
+        vm.prank(TEAM);
+        vm.expectRevert(VaultBase.InvalidAmount.selector);
+        fresh.bindToken(address(token));
+        // A stray wei sent before TEAM binds is a donation, not a veto.
+        vm.prank(alice);
+        token.transfer(address(fresh), 2);
+        vm.prank(TEAM);
+        fresh.bindToken(address(token));
+        assertEq(fresh.token(), address(token));
+        assertEq(fresh.hamsterLiability(), 800_000_000 ether);
+        MockToken big = new MockToken();
+        big.mint(address(fresh), 800_000_000 ether);
+        big.mint(alice, 200_000_000 ether + 1);
+        HamsterVault other = new HamsterVault(TEAM, address(engine));
+        big.mint(address(other), 800_000_000 ether);
+        vm.prank(TEAM);
+        vm.expectRevert(VaultBase.InvalidAmount.selector);
+        other.bindToken(address(big));
     }
 }

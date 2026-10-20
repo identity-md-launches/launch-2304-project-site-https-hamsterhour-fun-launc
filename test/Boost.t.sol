@@ -245,7 +245,11 @@ contract BoostTest is VaultTestBase {
         (uint256 freeMining, uint256 reserve, uint256 freeBoost, uint256 boostReserve) = vault.bucketsLeft();
         assertEq(freeMining + reserve + vault.miningGranted(), 800_000_000 ether);
         assertEq(freeBoost + boostReserve, 0);
-        assertEq(vault.emissionCurve(18_750 ether), 375_000_000 ether);
+        // The base curve is untouched; the vault's curve extends from the sweep point to 800M.
+        assertEq(boost.emissionCurve(18_750 ether), 375_000_000 ether);
+        assertEq(boost.status(address(vault)).sweptLoss, 1 ether);
+        assertEq(vault.emissionCurve(1 ether), 20_000 ether);
+        assertEq(vault.emissionCurve(type(uint256).max), 800_000_000 ether);
         vm.expectRevert(HamsterBoost.AlreadyDone.selector);
         vault.sweepDormantBoost();
         nft = new MockNFT();
@@ -271,5 +275,61 @@ contract BoostTest is VaultTestBase {
         vm.warp(vault.deployedAt() + 365 days);
         vm.expectRevert(HamsterBoost.AlreadyDone.selector);
         vault.sweepDormantBoost();
+    }
+
+    function test_sweptBoostIsMinableAndEarlierWindowsAreUnchanged() public {
+        game.setLoss(0, alice, 1 ether);
+        game.setLoss(1, bob, 18_749 ether);
+        game.finalize(2);
+        _claim(0, alice);
+        (uint256 pendingBudget,) = vault.windowBudget(V2, 1);
+        vm.warp(vault.deployedAt() + 365 days);
+        vault.sweepDormantBoost();
+        // Window 1 was finalized before the sweep, so its budget is unchanged by the sweep.
+        (uint256 budget,) = vault.windowBudget(V2, 1);
+        assertEq(budget, pendingBudget);
+        assertEq(_claim(1, bob), 375_000_000 ether - 20_000 ether);
+        (uint256 globalLoss, uint256 rate, uint256 halving) = vault.currentMiningState();
+        assertEq(globalLoss, 18_750 ether);
+        assertEq(halving, 1);
+        // Beyond the sweep point the rate is scaled by (800M - F(L0)) / (750M - F(L0)).
+        // The sweep point is the finalized global loss, 18,750 IMD, where F = 375M.
+        uint256 room = 375_000_000 ether;
+        assertEq(rate, 10_000 ether * (room + 50_000_000 ether) / room);
+        uint256 k = 365 days / 1 hours + 2;
+        game.setLoss(k, carol, 18_750 ether);
+        vm.warp(uint256(GENESIS) + (k + 1) * 1 hours);
+        game.finalize(k + 1);
+        uint256 expected = 187_500_000 ether * (room + 50_000_000 ether) / room;
+        assertEq(vault.claimMined(V2, one(k), carol), expected);
+        // Saturating the curve now commits the whole 800M allocation.
+        game.setLoss(k + 1, carol, 100 * 18_750 ether);
+        vm.warp(uint256(GENESIS) + (k + 2) * 1 hours);
+        game.finalize(k + 2);
+        vault.claimMined(V2, one(k + 1), carol);
+        assertEq(vault.miningCommitted(), 800_000_000 ether);
+        (uint256 freeMining,,,) = vault.bucketsLeft();
+        assertEq(freeMining, 0);
+        _conservation();
+    }
+
+    function test_pendingBoostCommitmentCanBeReplacedBeforeExecution() public {
+        MockNFT wrong = new MockNFT();
+        nft = new MockNFT();
+        vm.prank(TEAM);
+        vault.activateBoost(address(wrong));
+        vm.warp(vm.getBlockTimestamp() + 6 hours);
+        vm.prank(TEAM);
+        vault.activateBoost(address(nft));
+        assertEq(boost.status(address(vault)).pendingCollection, address(nft));
+        vm.warp(vm.getBlockTimestamp() + 6 hours);
+        vm.expectRevert(HamsterBoost.NotReady.selector);
+        vault.executeBoost();
+        vm.warp(vm.getBlockTimestamp() + 6 hours);
+        vault.executeBoost();
+        assertEq(boost.status(address(vault)).collection, address(nft));
+        vm.prank(TEAM);
+        vm.expectRevert(HamsterBoost.AlreadyDone.selector);
+        vault.activateBoost(address(wrong));
     }
 }

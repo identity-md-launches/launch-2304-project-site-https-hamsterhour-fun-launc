@@ -65,17 +65,13 @@ abstract contract HamsterMining is VaultBase {
         gameList.push(GAME_V2);
     }
 
+    /// @notice The curve in force: the base 750M curve, extended after a dormant-boost sweep.
     function emissionCurve(uint256 loss) public view returns (uint256) {
-        return boostEngine.emissionCurve(loss);
+        return boostEngine.extendedCurve(address(this), loss);
     }
 
     function currentMiningState() external view returns (uint256 globalLoss, uint256 rate, uint256 halving) {
         return boostEngine.currentMiningState(address(this));
-    }
-
-    function rateAndHalving(uint256 globalLoss) external pure returns (uint256 rate, uint256 halving) {
-        halving = globalLoss / HALF_LOSS;
-        rate = halving >= 256 ? 0 : (20_000 ether >> halving);
     }
 
     function gameCount() external view returns (uint256) {
@@ -128,8 +124,11 @@ abstract contract HamsterMining is VaultBase {
         if (oldEnd < prev.localOrigin) revert BadLossHistory();
         // Exclude ALL of the successor's pre-switch backlog, even if it was not finalized at switch.
         if (IHamsterGame(game).nextFinalizeWindow() < g.first) revert NotFinalized();
+        // Loss the previous game's 14-day cap left unconsumed is not part of the curve position.
+        (bool complete, uint256 dropped) = boostEngine.prepareCap(address(this), g.previous, 16);
+        if (!complete) revert NotFinalized();
         g.localOrigin = g.first == 0 ? 0 : IHamsterGame(game).cumulativeLossAfter(g.first - 1);
-        g.globalOrigin = prev.globalOrigin + (oldEnd - prev.localOrigin);
+        g.globalOrigin = prev.globalOrigin + (oldEnd - prev.localOrigin) - dropped;
         g.rangeReady = true;
         emit RangeResolved(game, g.localOrigin, g.globalOrigin);
     }
@@ -147,14 +146,14 @@ abstract contract HamsterMining is VaultBase {
     }
 
     function _prepareWindow(address game, uint256 k) internal returns (uint256 budget, uint256 total) {
-        (budget, total) = windowBudget(game, k);
         WindowAccounting storage w = windowAccounting[game][k];
+        if (!w.prepared) boostEngine.prepareCap(address(this), game, 16);
+        (budget, total) = windowBudget(game, k);
         if (!w.prepared) {
             w.prepared = true;
             w.budget = budget;
             miningCommitted += budget;
-            // The original curve remains unchanged after the reserve reclassification.
-            if (miningCommitted > MINING_ALLOCATION) revert BadLossHistory();
+            if (miningCommitted > miningAllocation) revert BadLossHistory();
             emit WindowPrepared(game, k, budget);
         }
     }

@@ -89,7 +89,7 @@ abstract contract VaultTestBase is Test {
         assertEq(hamster.balanceOf(address(vault)), vault.hamsterLiability(), "HAMSTER conservation");
         assertEq(imd.balanceOf(address(vault)), vault.imdLiability(), "IMD conservation");
         assertLe(vault.miningGranted(), vault.miningCommitted());
-        assertLe(vault.miningCommitted(), vault.MINING_ALLOCATION());
+        assertLe(vault.miningCommitted(), vault.miningAllocation());
         HamsterBoost.State memory s = boost.status(address(vault));
         assertLe(s.granted, s.committed);
         assertLe(s.committed, vault.BOOST_ALLOCATION());

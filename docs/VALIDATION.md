@@ -5,7 +5,7 @@ These are local results, not an independent attestation or security audit.
 | Check | Result |
 | --- | --- |
 | `forge build --sizes` | Passed |
-| `forge test -vv` with the assignment's fuzz seed | 52 passed, 0 failed, 0 skipped, across 6 suites |
+| `forge test -vv` with the assignment's fuzz seed | 60 passed, 0 failed, 0 skipped, across 6 suites |
 | Fuzz cases | 4 fuzz properties, 256 runs each |
 | `forge fmt --check` | Passed |
 | Application runtime opcode scan | No DELEGATECALL, CALLCODE or SELFDESTRUCT under the protected scan |
@@ -22,8 +22,8 @@ Fuzz seed:
 
 | Application | Runtime bytes | Initcode bytes | EIP-170 runtime margin |
 | --- | ---: | ---: | ---: |
-| HamsterBoost | 13,538 | 13,564 | 11,038 |
-| HamsterVault | 23,936 | 24,965 | 640 |
+| HamsterBoost | 17,925 | 17,951 | 6,651 |
+| HamsterVault | 24,421 | 25,464 | 155 |
 
 The deployment tests instantiate the vault with no dependency code and verify its explicit TEAM argument. The integration suite runs the actual v2 game source with local fixture attestations. The 502-day boost exhaustion test advances EVM timestamps and completes in seconds; it does not wait on the clock. No tests read or set environment variables, fetch network data, or require access to wallet keys.
 
