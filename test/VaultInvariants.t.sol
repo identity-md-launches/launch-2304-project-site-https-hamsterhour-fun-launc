@@ -30,6 +30,7 @@ contract VaultHandler is Test {
     bool public payoutMismatch;
     bool public unexpectedWeight;
     uint256 public calls;
+    uint256 public vestedWithdrawals;
 
     constructor(HamsterVault vault_, MockGame game_, MockToken hamster_, MockToken imd_, address[3] memory actors_) {
         vault = vault_;
@@ -135,7 +136,17 @@ contract VaultHandler is Test {
         uint256[] memory ids = new uint256[](1);
         ids[0] = id;
         uint256 before_ = hamster.balanceOf(who);
+        // Only the grantee may withdraw; record a third party succeeding as a mismatch.
+        address caller = _actor(idSeed >> 128);
+        if (caller != who) {
+            vm.prank(caller);
+            try vault.withdrawVested(who, ids) {
+                payoutMismatch = true;
+            } catch {}
+        }
+        vm.prank(who);
         uint256 out = vault.withdrawVested(who, ids);
+        vestedWithdrawals++;
         if (out != due || hamster.balanceOf(who) != before_ + due) payoutMismatch = true;
         hamsterOut[who] += out;
     }

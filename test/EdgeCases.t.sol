@@ -211,7 +211,7 @@ contract EdgeCasesTest is VaultTestBase {
         game.setLoss(0, alice, 1 ether);
         game.finalize(2);
         _claim(0, alice);
-        vm.prank(alice);
+        vm.startPrank(alice);
         vm.expectRevert(HamsterStaking.WrongLot.selector);
         vault.requestUnstake(0, 1);
         // Nothing is vested in the claim's own second.
@@ -221,11 +221,20 @@ contract EdgeCasesTest is VaultTestBase {
         vault.withdrawVested(alice, new uint256[](0));
         vm.expectRevert();
         vault.withdrawVested(alice, one(1));
+        vm.stopPrank();
         vm.warp(vm.getBlockTimestamp() + 7 days / 2);
         assertEq(vault.vested(alice, 0), 10_000 ether);
         vm.warp(vm.getBlockTimestamp() + 365 days);
         assertEq(vault.vested(alice, 0), 20_000 ether);
+        // Only the grantee decides when vested principal leaves the weight pool.
+        address[3] memory others = [bob, carol, address(this)];
+        for (uint256 i; i < others.length; ++i) {
+            vm.prank(others[i]);
+            vm.expectRevert(HamsterStaking.NotAccount.selector);
+            vault.withdrawVested(alice, one(0));
+        }
         // Same id twice in one batch pays only once.
+        vm.prank(alice);
         assertEq(vault.withdrawVested(alice, pair(0, 0)), 20_000 ether);
         assertEq(vault.grantBalance(alice), 0);
         _conservation();
@@ -308,15 +317,25 @@ contract EdgeCasesTest is VaultTestBase {
         vm.warp(vault.deployedAt() + 365 days - 12 hours - 1);
         vm.prank(TEAM);
         vault.activateBoost(nft);
+        // A pending commitment can be replaced only while its execution still fits the deadline.
         vm.prank(TEAM);
-        vm.expectRevert(HamsterBoost.AlreadyDone.selector);
         vault.activateBoost(nft);
-        vm.warp(vm.getBlockTimestamp() + 12 hours - 1);
+        vm.warp(vm.getBlockTimestamp() + 1);
+        vm.prank(TEAM);
+        vm.expectRevert(HamsterBoost.NotReady.selector);
+        vault.activateBoost(nft);
+        vm.warp(vm.getBlockTimestamp() + 12 hours - 2);
         vm.expectRevert(HamsterBoost.NotReady.selector);
         vault.executeBoost();
         vm.warp(vm.getBlockTimestamp() + 1);
         vault.executeBoost();
         assertEq(boost.status(address(vault)).collection, nft);
+        // Activation is once: neither a new schedule nor a second execution is possible.
+        vm.prank(TEAM);
+        vm.expectRevert(HamsterBoost.AlreadyDone.selector);
+        vault.activateBoost(nft);
+        vm.expectRevert(HamsterBoost.NotReady.selector);
+        vault.executeBoost();
         vm.warp(vault.deployedAt() + 400 days);
         vm.expectRevert(HamsterBoost.AlreadyDone.selector);
         vault.sweepDormantBoost();
@@ -350,17 +369,17 @@ contract EdgeCasesTest is VaultTestBase {
     }
 
     function test_rateAndHalvingEdges() public view {
-        (uint256 rate, uint256 halving) = vault.rateAndHalving(0);
+        (uint256 rate, uint256 halving) = boost.rateAndHalving(0);
         assertEq(rate, 20_000 ether);
         assertEq(halving, 0);
-        (rate, halving) = vault.rateAndHalving(18_750 ether - 1);
+        (rate, halving) = boost.rateAndHalving(18_750 ether - 1);
         assertEq(rate, 20_000 ether);
-        (rate, halving) = vault.rateAndHalving(18_750 ether);
+        (rate, halving) = boost.rateAndHalving(18_750 ether);
         assertEq(rate, 10_000 ether);
         assertEq(halving, 1);
-        (rate,) = vault.rateAndHalving(256 * 18_750 ether);
+        (rate,) = boost.rateAndHalving(256 * 18_750 ether);
         assertEq(rate, 0);
-        (rate,) = vault.rateAndHalving(type(uint256).max);
+        (rate,) = boost.rateAndHalving(type(uint256).max);
         assertEq(rate, 0);
         assertEq(vault.emissionCurve(0), 0);
         assertEq(vault.emissionCurve(1), 20_000);
@@ -423,6 +442,80 @@ contract EdgeCasesTest is VaultTestBase {
             vault.claimMined(address(successor), one(k), alice);
         }
         assertLe(vault.miningCommitted() - committedBefore, 4_000_000 ether);
+        _conservation();
+    }
+
+    function test_prepareCapBoundsAndUnknownOrUnresolvedGames() public {
+        vm.expectRevert(HamsterBoost.TooMany.selector);
+        boost.prepareCap(address(vault), V2, 0);
+        vm.expectRevert(HamsterBoost.TooMany.selector);
+        boost.prepareCap(address(vault), V2, 17);
+        // The first game has no cap period.
+        (bool complete, uint256 dropped) = boost.prepareCap(address(vault), V2, 1);
+        assertTrue(complete);
+        assertEq(dropped, 0);
+        MockGame stranger = new MockGame(GENESIS);
+        vm.expectRevert(HamsterBoost.UnknownGame.selector);
+        boost.prepareCap(address(vault), address(stranger), 1);
+        MockGame next = new MockGame(GENESIS);
+        uint256 switchTime = _switch(next);
+        vm.expectRevert(HamsterBoost.NotReady.selector);
+        boost.prepareCap(address(vault), address(next), 1);
+        _resolve(next);
+        // Nothing of an unfinished UTC day is cached; preparation stops there.
+        (complete,) = boost.prepareCap(address(vault), address(next), 16);
+        assertFalse(complete);
+        (bool ready,,,,) = boost.capDays(address(vault), address(next), switchTime / 1 days);
+        assertFalse(ready);
+        (, uint256 nextDay,,) = boost.capStates(address(vault), address(next));
+        assertEq(nextDay, switchTime / 1 days);
+        // After the full 14-day period every day is cached and the state is complete.
+        vm.warp(switchTime + 15 days + 2 hours);
+        next.finalize(20_000);
+        (complete, dropped) = boost.prepareCap(address(vault), address(next), 16);
+        assertTrue(complete);
+        assertEq(dropped, 0);
+        (complete,) = boost.prepareCap(address(vault), address(next), 1);
+        assertTrue(complete);
+    }
+
+    /// forge-config: default.fuzz.runs = 128
+    function testFuzz_cappedDayPaysAtMostTwoMillionAtAnyCurvePosition(uint256 priorSeed, uint256 lossSeed) public {
+        uint256 prior = bound(priorSeed, 0, 60 * 18_750 ether);
+        if (prior != 0) game.setLoss(0, carol, prior);
+        MockGame next = new MockGame(GENESIS);
+        uint256 switchTime = _switch(next);
+        uint256 day = switchTime / 1 days + 1;
+        uint256 first = (day * 1 days - GENESIS + 1 hours - 1) / 1 hours;
+        uint256 lossA = bound(lossSeed, 1, 40_000 ether);
+        uint256 lossB = bound(uint256(keccak256(abi.encode(lossSeed))), 0, 40_000 ether);
+        next.setLoss(first, alice, lossA);
+        next.setLoss(first + 5, bob, lossB);
+        vm.warp((day + 1) * 1 days + 1 hours);
+        _resolve(next);
+        if (prior != 0) _claim(0, carol);
+        uint256 committedBefore = vault.miningCommitted();
+        uint256 paid = vault.claimMined(address(next), one(first + 5), bob);
+        paid += vault.claimMined(address(next), one(first), alice);
+        (bool ready, uint256 pos,, uint256 raw, uint256 allowance) = boost.capDays(address(vault), address(next), day);
+        assertTrue(ready);
+        assertEq(pos, prior);
+        assertEq(raw, vault.emissionCurve(prior + lossA + lossB) - vault.emissionCurve(prior));
+        assertLe(allowance, 2_000_000 ether, "capped day above 2M");
+        if (raw <= 2_000_000 ether) assertEq(allowance, raw);
+        else assertApproxEqAbs(allowance, 2_000_000 ether, 1e12, "cap forfeits emission");
+        // Splitting the allowance pro rata across the day's windows rounds each one down.
+        uint256 committedDelta = vault.miningCommitted() - committedBefore;
+        assertLe(committedDelta, allowance);
+        assertLe(allowance - committedDelta, 2);
+        assertLe(paid, committedDelta);
+        assertLe(committedDelta - paid, 2);
+        // The curve advanced only by the loss actually paid for; the rest is deferred.
+        (uint256 globalLoss,,) = vault.currentMiningState();
+        assertApproxEqAbs(vault.emissionCurve(globalLoss), vault.miningCommitted(), 2);
+        assertGe(vault.emissionCurve(globalLoss), vault.miningCommitted());
+        (,,, uint256 dropped) = boost.capStates(address(vault), address(next));
+        assertEq(globalLoss + dropped, prior + lossA + lossB);
         _conservation();
     }
 
